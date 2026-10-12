@@ -4,10 +4,10 @@
 
 - Jellyfin browser
 
-## Setup plugin Source
+## Add plugin Source
 
 ```bash
-noctalia msg plugins source add dev path ~repos/noctalia-plugins
+noctalia msg plugins source add ktkr3d git https://github.com/ktkr3d/noctalia-plugins
 ```
 
 or
