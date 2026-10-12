@@ -1,7 +1,7 @@
 [[plugin]]
 id = "ktkr3d/jellyfin-browser"
 name = "Jellyfin browser"
-version = "0.0.3"
+version = "0.0.4"
 author = "ktkr3d"
 license = "MIT"
 icon = "puzzle"

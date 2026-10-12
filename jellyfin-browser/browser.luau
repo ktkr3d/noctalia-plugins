@@ -32,6 +32,13 @@ local artworkPending = {}
 local artworkQueue = {}
 local artworkDownloadsActive = 0
 local MAX_ARTWORK_DOWNLOADS = 3
+local mpvSocketPath = nil
+local mpvCommandGeneration = 0
+local mpvPlayerAvailable = false
+local mpvStarting = false
+local mpvPaused = false
+local mpvControlPending = false
+local mpvPlaybackState = "stopped"
 
 local render
 
@@ -162,6 +169,31 @@ render = function()
     end
 
     local content = {}
+    if mpvPlayerAvailable then
+        table.insert(content, ui.row({ gap = 8, align = "center" }, {
+            ui.label({
+                text = "mpv · " .. (mpvPaused and "Paused" or mpvPlaybackState),
+                flexGrow = 1,
+                color = "on_surface_variant",
+            }),
+            ui.button({
+                text = mpvPaused and "Resume" or "Pause",
+                enabled = mpvPlaybackState ~= "stopped" and not mpvControlPending and not mpvStarting,
+                onClick = "onTogglePause",
+            }),
+            ui.button({
+                text = "Stop",
+                enabled = mpvPlaybackState ~= "stopped" and not mpvControlPending and not mpvStarting,
+                onClick = "onStopPlayback",
+            }),
+            ui.button({
+                text = "Next",
+                enabled = mpvPlaybackState ~= "stopped" and not mpvControlPending and not mpvStarting,
+                onClick = "onNextPlayback",
+            }),
+        }))
+    end
+
     if not accessToken then
         table.insert(content, ui.label({
             text = "Connect to your Jellyfin server",
@@ -364,6 +396,186 @@ local function getSessionPath()
     sessionDataDir = dataDir:gsub("/+$", "")
     sessionPath = sessionDataDir .. "/session.json"
     return sessionPath, nil
+end
+
+local function prepareMpvIpc(callback)
+    if not noctalia.commandExists("socat") then
+        callback(false, "socat is not installed or is not available in Noctalia's PATH.")
+        return
+    end
+
+    local _, pathError = getSessionPath()
+    if pathError then
+        callback(false, pathError)
+        return
+    end
+    mpvSocketPath = sessionDataDir .. "/mpv.sock"
+
+    if not noctalia.commandExists("chmod") then
+        callback(false, "Cannot secure the mpv control socket because chmod is unavailable.")
+        return
+    end
+    local accepted = noctalia.runAsync({ "chmod", "700", sessionDataDir }, function(result)
+        if result.exitCode ~= 0 or result.timedOut then
+            callback(false, "Could not secure the mpv control socket directory.")
+            return
+        end
+        callback(true, nil)
+    end)
+    if not accepted then
+        callback(false, "Could not start chmod to secure the mpv control socket directory.")
+    end
+end
+
+local function removeMpvCommandFile(path)
+    local removed, removeError = noctalia.removeFile(path)
+    if not removed and noctalia.fileExists(path) then
+        noctalia.log("could not remove temporary mpv command: " .. tostring(removeError or "unknown error"))
+    end
+end
+
+local function sendMpvCommand(command, retries, callback)
+    local contents, encodeError = noctalia.json.encode({ command = command })
+    if not contents then
+        callback(false, "Could not encode an mpv command: " .. tostring(encodeError or "JSON encoding failed"))
+        return
+    end
+
+    prepareMpvIpc(function(ready, prepareError)
+        if not ready then
+            callback(false, prepareError)
+            return
+        end
+
+        mpvCommandGeneration += 1
+        local requestPath = sessionDataDir .. "/mpv-command-" .. tostring(mpvCommandGeneration) .. ".json"
+        local written, writeError = noctalia.writeFile(requestPath, contents .. "\n")
+        if not written then
+            callback(false, "Could not prepare an mpv command: " .. tostring(writeError or "unknown error"))
+            return
+        end
+
+        local chmodAccepted = noctalia.runAsync({ "chmod", "600", requestPath }, function(permissionResult)
+            if permissionResult.exitCode ~= 0 or permissionResult.timedOut then
+                removeMpvCommandFile(requestPath)
+                callback(false, "Could not secure the mpv command file.")
+                return
+            end
+
+            local script = 'attempt=0\nwhile [ "$attempt" -lt "$3" ]; do\n'
+                .. '  if socat -T 1 - "UNIX-CONNECT:$2" < "$1" >/dev/null 2>&1; then exit 0; fi\n'
+                .. '  attempt=$((attempt + 1))\n  sleep 0.1\ndone\nexit 1'
+            local accepted = noctalia.runAsync({
+                "sh",
+                "-c",
+                script,
+                "jellyfin-browser",
+                requestPath,
+                mpvSocketPath,
+                tostring(retries),
+            }, function(result)
+                removeMpvCommandFile(requestPath)
+                if result.exitCode ~= 0 or result.timedOut then
+                    callback(false, "Could not communicate with mpv through its control socket.")
+                    return
+                end
+                callback(true, nil)
+            end)
+            if not accepted then
+                removeMpvCommandFile(requestPath)
+                callback(false, "Could not start socat to communicate with mpv.")
+            end
+        end)
+        if not chmodAccepted then
+            removeMpvCommandFile(requestPath)
+            callback(false, "Could not start chmod to secure the mpv command.")
+        end
+    end)
+end
+
+local function playMpvCommand(command, onSuccess, onFailure)
+    if mpvStarting then
+        errorMessage = "mpv is starting. Please try again in a moment."
+        if onFailure then
+            onFailure(errorMessage)
+        end
+        render()
+        return
+    end
+
+    mpvStarting = true
+    sendMpvCommand(command, 3, function(sent)
+        if sent then
+            mpvStarting = false
+            mpvPlayerAvailable = true
+            mpvPaused = false
+            mpvPlaybackState = "playing"
+            onSuccess()
+            render()
+            return
+        end
+
+        mpvPlayerAvailable = false
+
+        prepareMpvIpc(function(ready, prepareError)
+            if not ready then
+                mpvStarting = false
+                errorMessage = prepareError
+                if onFailure then
+                    onFailure(prepareError)
+                end
+                render()
+                return
+            end
+
+            if noctalia.fileExists(mpvSocketPath) then
+                local removed, removeError = noctalia.removeFile(mpvSocketPath)
+                if not removed then
+                    mpvStarting = false
+                    errorMessage = "Could not remove the stale mpv control socket: "
+                        .. tostring(removeError or "unknown error")
+                    if onFailure then
+                        onFailure(errorMessage)
+                    end
+                    render()
+                    return
+                end
+            end
+
+            local started = noctalia.runAsync({
+                "mpv",
+                "--fs",
+                "--idle=yes",
+                "--input-ipc-server=" .. mpvSocketPath,
+            })
+            if not started then
+                mpvStarting = false
+                errorMessage = "Could not start mpv. Make sure it is installed."
+                if onFailure then
+                    onFailure(errorMessage)
+                end
+                render()
+                return
+            end
+
+            sendMpvCommand(command, 30, function(commandSent, commandError)
+                mpvStarting = false
+                if not commandSent then
+                    errorMessage = commandError
+                    if onFailure then
+                        onFailure(commandError)
+                    end
+                    render()
+                    return
+                end
+                mpvPlayerAvailable = true
+                mpvPaused = false
+                mpvPlaybackState = "playing"
+                onSuccess()
+                render()
+            end)
+        end)
+    end)
 end
 
 local function saveSession(onComplete)
@@ -671,14 +883,10 @@ function playInMpv(itemId, isAudio, itemName)
     local endpoint = isAudio and "/Audio/" or "/Videos/"
     local streamUrl = serverUrl .. endpoint .. noctalia.string.urlEncode(itemId)
         .. "/stream?static=true&api_key=" .. noctalia.string.urlEncode(accessToken)
-    local accepted = noctalia.runAsync({ "mpv", "--fs", streamUrl })
-    if not accepted then
-        errorMessage = "Could not start mpv. Make sure it is installed."
-    else
+    playMpvCommand({ "loadfile", streamUrl, "replace" }, function()
         errorMessage = ""
         statusMessage = "Opening " .. (itemName or "media") .. " in mpv."
-    end
-    render()
+    end)
 end
 
 local function finishQueue(generation, message, isError)
@@ -761,29 +969,32 @@ local function launchMpvPlaylist(entries, shuffle, generation)
                 return
             end
 
-            local args = {
-                "sh",
-                "-c",
-                'playlist_path=$1\nshift\nmpv --fs "$@" --playlist="$playlist_path"\n'
-                    .. 'exit_code=$?\nrm -f -- "$playlist_path"\nexit "$exit_code"',
-                "jellyfin-browser",
-                playlistPath,
-            }
-            if shuffle then
-                table.insert(args, "--shuffle")
-            end
-            local started = noctalia.runAsync(args)
-            if not started then
+            local function finishPlaylist()
                 removePlaybackPlaylist(playlistPath)
-                finishQueue(generation, "Could not start mpv. Make sure it is installed.", true)
-                return
+                finishQueue(
+                    generation,
+                    (shuffle and "Shuffling " or "Playing ")
+                        .. tostring(#entries) .. " items in mpv.",
+                    false
+                )
             end
-            finishQueue(
-                generation,
-                (shuffle and "Shuffling " or "Playing ")
-                    .. tostring(#entries) .. " items in mpv.",
-                false
-            )
+            playMpvCommand({ "loadlist", playlistPath, "replace" }, function()
+                if not shuffle then
+                    finishPlaylist()
+                    return
+                end
+                sendMpvCommand({ "playlist-shuffle" }, 3, function(shuffled, shuffleError)
+                    if not shuffled then
+                        removePlaybackPlaylist(playlistPath)
+                        finishQueue(generation, shuffleError, true)
+                        return
+                    end
+                    finishPlaylist()
+                end)
+            end, function(playbackError)
+                removePlaybackPlaylist(playlistPath)
+                finishQueue(generation, playbackError, true)
+            end)
         end)
         if not chmodAccepted then
             removePlaybackPlaylist(playlistPath)
@@ -803,6 +1014,11 @@ local function playLibraryItems(shuffle)
 
     if not noctalia.commandExists("mpv") then
         errorMessage = "mpv is not installed or is not available in Noctalia's PATH."
+        render()
+        return
+    end
+    if not noctalia.commandExists("socat") then
+        errorMessage = "socat is not installed or is not available in Noctalia's PATH."
         render()
         return
     end
@@ -899,6 +1115,52 @@ end
 
 function onShuffle()
     playLibraryItems(true)
+end
+
+local function controlMpv(command, onSuccess)
+    if not mpvPlayerAvailable or mpvControlPending or mpvStarting then
+        return
+    end
+
+    mpvControlPending = true
+    render()
+    sendMpvCommand(command, 3, function(sent, sendError)
+        mpvControlPending = false
+        if not sent then
+            mpvPlayerAvailable = false
+            errorMessage = sendError
+        else
+            onSuccess()
+        end
+        render()
+    end)
+end
+
+function onTogglePause()
+    local pause = not mpvPaused
+    controlMpv({ "set_property", "pause", pause }, function()
+        mpvPaused = pause
+        statusMessage = pause and "Playback paused." or "Playback resumed."
+        errorMessage = ""
+    end)
+end
+
+function onStopPlayback()
+    controlMpv({ "stop" }, function()
+        mpvPaused = false
+        mpvPlaybackState = "stopped"
+        statusMessage = "Playback stopped."
+        errorMessage = ""
+    end)
+end
+
+function onNextPlayback()
+    controlMpv({ "playlist-next" }, function()
+        mpvPaused = false
+        mpvPlaybackState = "playing"
+        statusMessage = "Playing the next item."
+        errorMessage = ""
+    end)
 end
 
 function onOpen()

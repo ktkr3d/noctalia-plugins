@@ -1,13 +1,13 @@
 id = "ktkr3d/jellyfin-browser"
 name = "Jellyfin Browser"
-version = "0.0.3"
+version = "0.0.4"
 plugin_api = 32
 author = "ktkr3d"
 license = "MIT"
 icon = "device-tv"
 description = "Browse the Jellyfin server library and play media."
 tags = ["music", "video", "widget"]
-dependencies = ["mpv"]
+dependencies = ["mpv", "socat"]
 
 [[widget]]
 id = "browser"
