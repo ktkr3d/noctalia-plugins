@@ -1,53 +1,51 @@
-# Noctalia Plugins
+# Jellyfin Browser
 
-## Plugins
+This plugin allows you to browse the Jellyfin server library and play media.
 
-- Jellyfin browser
+## Plugin
 
-## Add plugin Source
+| Field | Value |
+| --- | --- |
+| ID | `ktkr3d/jellyfin-browser` |
+| Entries | Bar widget: `browser`; panel: `panel` |
 
-```bash
-noctalia msg plugins source add ktkr3d git https://github.com/ktkr3d/noctalia-plugins
-```
+## Requirements
 
-or
+Install `mpv`.
 
-1. Open Noctalia settings (Super + Z)
-2. Plugins > Sources
-3. Add Source
-4. Select Git
-    - Source ID : ktr3d
-    - Location : https://github.com/ktkr3d/noctalia-plugins
-5. Add Source
+## Usage
 
-## Enable plugin
+Add the widget to your bar
+Open the panel and connect your jellyfin server by URL, username and password.
+Browse library and play media
 
-```bash
-noctalia msg plugins enable ktkr3d/jellyfin-browser
-```
+To toggle or open the panel from a terminal or keybinding:
 
-or
-
-1. Open Noctalia settings (Super + Z)
-2. Plugins > Plugins
-3. **toggle** enable plugin
-
-## Setup widget
-
-1. Open Noctalia settings (Super + Z)
-2. Bar: default > Widget List
-3. Add widget
-4. Select widget
-
-## How to use
-
-```bash
+```sh
 noctalia msg panel-toggle ktkr3d/jellyfin-browser:panel
 ```
-
-or use panel widget
 
 Open a library or folder and select **Play all** to play its playable items
 sequentially in mpv, or **Shuffle** to play them in a shuffled order. These
 actions include all matching items in the current folder, including items on
 pages that have not been loaded in the browser.
+
+## Settings
+
+| Setting | Type | Default | Description |
+| --- | --- | --- | --- |
+| `show_label` | `bool` | `false` | Show plugin name. |
+
+## Notes
+
+#### Add plugin souce
+
+```bash
+noctalia msg plugins source add ktkr3d git https://github.com/ktkr3d/noctalia-plugins
+```
+
+#### Enable plugin
+
+```bash
+noctalia msg plugins enable ktkr3d/jellyfin-browser
+```
