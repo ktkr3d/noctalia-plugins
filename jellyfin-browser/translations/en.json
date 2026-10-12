@@ -1,0 +1,8 @@
+{
+  "settings": {
+    "show_label": {
+      "label": "Show Label",
+      "description": "Show the Jellyfin label next to the widget icon."
+    }
+  }
+}
