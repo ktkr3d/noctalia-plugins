@@ -46,3 +46,8 @@ noctalia msg panel-toggle ktkr3d/jellyfin-browser:panel
 ```
 
 or use panel widget
+
+Open a library or folder and select **Play all** to play its playable items
+sequentially in mpv, or **Shuffle** to play them in a shuffled order. These
+actions include all matching items in the current folder, including items on
+pages that have not been loaded in the browser.

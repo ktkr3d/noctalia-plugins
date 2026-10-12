@@ -1,6 +1,6 @@
 id = "ktkr3d/jellyfin-browser"
 name = "Jellyfin Browser"
-version = "0.0.1"
+version = "0.0.2"
 plugin_api = 32
 
 [[widget]]

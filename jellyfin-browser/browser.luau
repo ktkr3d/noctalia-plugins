@@ -20,10 +20,12 @@ local items = {}
 local navigation = {}
 local totalItems = 0
 local loading = false
+local queueLoading = false
 local statusMessage = ""
 local sessionWarning = ""
 local errorMessage = ""
 local requestGeneration = 0
+local queueGeneration = 0
 local artworkDirectory = nil
 local artworkPaths = {}
 local artworkPending = {}
@@ -32,6 +34,15 @@ local artworkDownloadsActive = 0
 local MAX_ARTWORK_DOWNLOADS = 3
 
 local render
+
+local function isPlayableMedia(item)
+    local mediaType = item.Type
+    return mediaType == "Audio"
+        or mediaType == "Movie"
+        or mediaType == "Episode"
+        or mediaType == "MusicVideo"
+        or mediaType == "Video"
+end
 
 local function safeCacheName(value)
     return tostring(value):gsub("[^%w_-]", "_")
@@ -221,6 +232,19 @@ render = function()
                 }))
             end
         else
+            table.insert(content, ui.row({ gap = 8, align = "center" }, {
+                ui.button({
+                    text = queueLoading and "Preparing playlist..." or "Play all",
+                    variant = "primary",
+                    enabled = not loading and not queueLoading,
+                    onClick = "onPlayAll",
+                }),
+                ui.button({
+                    text = "Shuffle",
+                    enabled = not loading and not queueLoading,
+                    onClick = "onShuffle",
+                }),
+            }))
             if #items == 0 and not loading then
                 table.insert(content, ui.label({ text = "This library is empty." }))
             end
@@ -229,11 +253,7 @@ render = function()
                 local isFolder = item.IsFolder == true
                 local mediaType = item.Type
                 local isAudio = mediaType == "Audio"
-                local canPlay = isAudio
-                    or mediaType == "Movie"
-                    or mediaType == "Episode"
-                    or mediaType == "MusicVideo"
-                    or mediaType == "Video"
+                local canPlay = isPlayableMedia(item)
                 local details = item.Type or "Item"
                 if item.ProductionYear then
                     details = details .. " · " .. tostring(item.ProductionYear)
@@ -661,6 +681,226 @@ function playInMpv(itemId, isAudio, itemName)
     render()
 end
 
+local function finishQueue(generation, message, isError)
+    if generation ~= queueGeneration then
+        return
+    end
+    queueLoading = false
+    if isError then
+        errorMessage = message
+    else
+        errorMessage = ""
+        statusMessage = message
+    end
+    render()
+end
+
+local function removePlaybackPlaylist(path)
+    local ok, err = noctalia.removeFile(path)
+    if not ok and noctalia.fileExists(path) then
+        noctalia.log("could not remove temporary Jellyfin playback playlist: " .. tostring(err or "unknown error"))
+    end
+end
+
+local function launchMpvPlaylist(entries, shuffle, generation)
+    if #entries == 0 then
+        finishQueue(generation, "No playable items were found in this list.", true)
+        return
+    end
+    if not noctalia.commandExists("mpv") then
+        finishQueue(generation, "mpv is not installed or is not available in Noctalia's PATH.", true)
+        return
+    end
+
+    local path, pathError = getSessionPath()
+    if not path then
+        finishQueue(generation, pathError, true)
+        return
+    end
+    if not noctalia.commandExists("chmod") then
+        finishQueue(generation, "Cannot create a private playback playlist because chmod is unavailable.", true)
+        return
+    end
+
+    local playlistPath = sessionDataDir .. "/playback-" .. tostring(generation) .. ".m3u"
+    local playlist = "#EXTM3U\n"
+    for _, entry in ipairs(entries) do
+        local endpoint = entry.isAudio and "/Audio/" or "/Videos/"
+        local streamUrl = serverUrl .. endpoint .. noctalia.string.urlEncode(entry.id)
+            .. "/stream?static=true&api_key=" .. noctalia.string.urlEncode(accessToken)
+        playlist ..= streamUrl .. "\n"
+    end
+
+    local accepted = noctalia.runAsync({ "chmod", "700", sessionDataDir }, function(result)
+        if generation ~= queueGeneration then
+            return
+        end
+        if result.exitCode ~= 0 or result.timedOut then
+            finishQueue(generation, "Could not secure the playback playlist directory.", true)
+            return
+        end
+
+        local ok, writeError = noctalia.writeFile(playlistPath, playlist)
+        if not ok then
+            finishQueue(
+                generation,
+                "Could not create the playback playlist: " .. tostring(writeError or "unknown error"),
+                true
+            )
+            return
+        end
+
+        local chmodAccepted = noctalia.runAsync({ "chmod", "600", playlistPath }, function(permissionResult)
+            if generation ~= queueGeneration then
+                removePlaybackPlaylist(playlistPath)
+                return
+            end
+            if permissionResult.exitCode ~= 0 or permissionResult.timedOut then
+                removePlaybackPlaylist(playlistPath)
+                finishQueue(generation, "Could not secure the playback playlist.", true)
+                return
+            end
+
+            local args = {
+                "sh",
+                "-c",
+                'playlist_path=$1\nshift\nmpv --fs "$@" --playlist="$playlist_path"\n'
+                    .. 'exit_code=$?\nrm -f -- "$playlist_path"\nexit "$exit_code"',
+                "jellyfin-browser",
+                playlistPath,
+            }
+            if shuffle then
+                table.insert(args, "--shuffle")
+            end
+            local started = noctalia.runAsync(args)
+            if not started then
+                removePlaybackPlaylist(playlistPath)
+                finishQueue(generation, "Could not start mpv. Make sure it is installed.", true)
+                return
+            end
+            finishQueue(
+                generation,
+                (shuffle and "Shuffling " or "Playing ")
+                    .. tostring(#entries) .. " items in mpv.",
+                false
+            )
+        end)
+        if not chmodAccepted then
+            removePlaybackPlaylist(playlistPath)
+            finishQueue(generation, "Could not start chmod to secure the playback playlist.", true)
+        end
+    end)
+
+    if not accepted then
+        finishQueue(generation, "Could not start chmod to secure the playback playlist directory.", true)
+    end
+end
+
+local function playLibraryItems(shuffle)
+    if not accessToken or #navigation == 0 or loading or queueLoading then
+        return
+    end
+
+    if not noctalia.commandExists("mpv") then
+        errorMessage = "mpv is not installed or is not available in Noctalia's PATH."
+        render()
+        return
+    end
+
+    queueGeneration += 1
+    local generation = queueGeneration
+    local parentId = navigation[#navigation].Id
+    local startIndex = 0
+    local totalCount = nil
+    local entries = {}
+    queueLoading = true
+    errorMessage = ""
+    statusMessage = ""
+    render()
+
+    local function fetchNextPage()
+        if generation ~= queueGeneration then
+            return
+        end
+
+        local query = "?ParentId=" .. noctalia.string.urlEncode(parentId)
+            .. "&Recursive=true&SortBy=SortName&SortOrder=Ascending"
+            .. "&StartIndex=" .. tostring(startIndex)
+            .. "&Limit=" .. tostring(PAGE_SIZE)
+            .. "&Fields=Overview,ProductionYear,ImageTags"
+        local accepted = noctalia.http({
+            url = serverUrl .. "/Users/" .. noctalia.string.urlEncode(userId) .. "/Items" .. query,
+            headers = requestHeaders(),
+        }, function(response)
+            if generation ~= queueGeneration then
+                return
+            end
+
+            local data, err = decodeResponse(
+                response,
+                200,
+                "preparing a playback playlist (/Users/{userId}/Items)",
+                "Your Jellyfin session expired. Please sign in again."
+            )
+            if not data then
+                if response.status == 401 then
+                    sessionWriteGeneration += 1
+                    accessToken = nil
+                    userId = nil
+                    userName = nil
+                    password = ""
+                    sessionWarning = ""
+                    local _, removeError = clearSavedSession()
+                    if removeError then
+                        err ..= " " .. removeError
+                    end
+                end
+                finishQueue(generation, err, true)
+                return
+            end
+            if type(data.Items) ~= "table" then
+                finishQueue(generation, "The server response did not contain library items.", true)
+                return
+            end
+
+            if startIndex == 0 then
+                totalCount = tonumber(data.TotalRecordCount)
+            end
+            for _, item in ipairs(data.Items) do
+                if type(item) == "table" and isPlayableMedia(item) and type(item.Id) == "string" then
+                    table.insert(entries, {
+                        id = item.Id,
+                        isAudio = item.Type == "Audio",
+                    })
+                end
+            end
+
+            startIndex += #data.Items
+            local hasMore = #data.Items > 0
+                and ((totalCount and startIndex < totalCount) or (not totalCount and #data.Items == PAGE_SIZE))
+            if hasMore then
+                fetchNextPage()
+            else
+                launchMpvPlaylist(entries, shuffle, generation)
+            end
+        end)
+
+        if not accepted then
+            finishQueue(generation, "Could not start a request to the Jellyfin server.", true)
+        end
+    end
+
+    fetchNextPage()
+end
+
+function onPlayAll()
+    playLibraryItems(false)
+end
+
+function onShuffle()
+    playLibraryItems(true)
+end
+
 function onOpen()
     if not sessionRestoreAttempted then
         sessionRestoreAttempted = true
@@ -797,6 +1037,7 @@ end
 
 function onLogout()
     requestGeneration += 1
+    queueGeneration += 1
     sessionWriteGeneration += 1
     accessToken = nil
     userId = nil
@@ -807,6 +1048,7 @@ function onLogout()
     navigation = {}
     totalItems = 0
     loading = false
+    queueLoading = false
     errorMessage = ""
     statusMessage = ""
     sessionWarning = ""
