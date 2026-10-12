@@ -1,0 +1,10 @@
+[[plugin]]
+id = "ktkr3d/jellyfin-browser"
+name = "Jellyfin browser"
+version = "0.0.1"
+author = "ktkr3d"
+license = "MIT"
+icon = "puzzle"
+description = "Jellyfin browser"
+plugin_api = 32
+tags = ["music", "video"]
