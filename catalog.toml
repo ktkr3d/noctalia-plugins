@@ -4,7 +4,18 @@ name = "Jellyfin browser"
 version = "0.0.4"
 author = "ktkr3d"
 license = "MIT"
-icon = "puzzle"
+icon = "device-tv"
 description = "Browse the Jellyfin server library and play media."
 plugin_api = 32
 tags = ["music", "video", "widget"]
+
+[[plugin]]
+id = "ktkr3d/ollama_remote"
+name = "Remote Ollama Chat"
+version = "0.0.1"
+author = "ktkr3d"
+license = "MIT"
+icon = "message"
+plugin_api = 32
+description = "Chat using the Ollama API on a remote PC"
+tags = ["ai", "widget"]

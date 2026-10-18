@@ -1,0 +1,8 @@
+{
+  "settings": {
+    "show_label": {
+      "label": "ラベルを表示",
+      "description": "ウィジェットのアイコンの横にOllamaラベルを表示します。"
+    }
+  }
+}

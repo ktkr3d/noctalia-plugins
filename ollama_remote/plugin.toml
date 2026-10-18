@@ -1,0 +1,29 @@
+id = "ktkr3d/ollama_remote"
+name = "Remote Ollama Chat"
+version = "0.0.1"
+author = "ktkr3d"
+license = "MIT"
+icon = "message"
+plugin_api = 32
+description = "Chat using the Ollama API on a remote PC"
+tags = ["ai", "widget"]
+dependencies = ["mpv", "socat"]
+
+[[widget]]
+id = "status"
+entry = "status.luau"
+
+  [[widget.setting]]
+  key = "show_label"
+  type = "bool"
+  label_key = "settings.show_label.label"
+  description_key = "settings.show_label.description"
+  default = false
+
+[[panel]]
+id = "chat"
+entry = "chat.luau"
+width = 520
+height = 640
+placement = "floating"
+position = "center"
