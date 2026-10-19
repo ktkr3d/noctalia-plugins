@@ -1,13 +1,13 @@
 id = "ktkr3d/ollama_remote"
-name = "Remote Ollama Chat"
-version = "0.0.1"
+name = "Ollama Remote Chat"
+version = "0.0.2"
 author = "ktkr3d"
 license = "MIT"
 icon = "message"
 plugin_api = 32
 description = "Chat using the Ollama API on a remote PC"
-tags = ["ai", "widget"]
-dependencies = ["mpv", "socat"]
+tags = ["ai"]
+dependencies = ["ollama"]
 
 [[widget]]
 id = "status"
